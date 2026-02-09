@@ -1,0 +1,10 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for local file conversion",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:path:default",
+    "dialog:default"
+  ]
+}

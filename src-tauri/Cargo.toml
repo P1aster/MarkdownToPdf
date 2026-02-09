@@ -1,0 +1,22 @@
+[package]
+name = "markdown_to_pdf"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tempfile = "3"
+walkdir = "2"
+zip = "2"
+printpdf = { version = "0.7", features = ["embedded_images"] }
+pulldown-cmark = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
