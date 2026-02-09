@@ -90,4 +90,4 @@ This project was created as a test for the Codex CLI tool learn project, explori
 
 ## License
 
-Private project.
+This project is open source and available for public use.
