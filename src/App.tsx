@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import DropZone, { type DropItem } from "./components/DropZone";
 import type { OpenDialogOptions } from "@tauri-apps/plugin-dialog";
+import appIcon from "./assets/app-icon.png";
 
 const STATUS_LABELS: Record<ProcessState, string> = {
   idle: "Awaiting input",
@@ -69,6 +70,12 @@ export default function App() {
     "Drop a markdown file, directory, or zip to begin."
   );
   const [outputPath, setOutputPath] = useState<string | null>(null);
+  const [isBooting, setIsBooting] = useState(true);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setIsBooting(false), 900);
+    return () => window.clearTimeout(timeout);
+  }, []);
 
   const statusTone = useMemo(() => {
     switch (state) {
@@ -171,9 +178,29 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-ink-950 text-ink-100">
+      {isBooting ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950">
+          <div className="flex flex-col items-center gap-4">
+            <img src={appIcon} alt="Markdown to PDF" className="h-16 w-16 animate-pulse" />
+            <p className="text-[11px] uppercase tracking-[0.4em] text-ink-200">
+              Loading
+            </p>
+          </div>
+        </div>
+      ) : null}
       <main className="mx-auto flex min-h-screen w-full max-w-5xl flex-col gap-10 px-6 py-14">
         <header className="flex flex-wrap items-end justify-between gap-6">
           <div className="float-in">
+            <div className="mb-5 flex items-center gap-3">
+              <img
+                src={appIcon}
+                alt="Markdown to PDF app icon"
+                className="h-11 w-11 rounded-2xl border border-ink-800/60 bg-ink-950/60 p-1"
+              />
+              <span className="text-xs uppercase tracking-[0.35em] text-ink-300">
+                Markdown to PDF
+              </span>
+            </div>
             <h1 className="font-display text-4xl leading-tight text-ink-100 md:text-5xl">
               Markdown to PDF, engineered for messy project folders.
             </h1>
@@ -181,6 +208,24 @@ export default function App() {
               Drop a folder, markdown file, or zip. The pipeline resolves linked markdown
               and images, then exports a single PDF.
             </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className="rounded-full border border-ink-700/70 bg-ink-900/70 px-5 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-ink-100 transition hover:border-ink-400/70 hover:text-ink-50"
+              onClick={handleBrowseFiles}
+              disabled={state === "processing"}
+            >
+              Select File
+            </button>
+            <button
+              type="button"
+              className="rounded-full border border-ink-700/70 bg-ink-900/70 px-5 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-ink-100 transition hover:border-ink-400/70 hover:text-ink-50"
+              onClick={handleBrowseFolder}
+              disabled={state === "processing"}
+            >
+              Select Folder
+            </button>
           </div>
         </header>
 
