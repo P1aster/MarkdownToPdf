@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import DropZone, { type DropItem } from "./components/DropZone";
 import type { OpenDialogOptions } from "@tauri-apps/plugin-dialog";
 import appIcon from "./assets/app-icon.png";
@@ -70,6 +70,9 @@ export default function App() {
     "Drop a markdown file, directory, or zip to begin."
   );
   const [outputPath, setOutputPath] = useState<string | null>(null);
+  const [processedInput, setProcessedInput] = useState<ProcessedInput | null>(null);
+  const [manualOrderEnabled, setManualOrderEnabled] = useState(false);
+  const [orderedMarkdown, setOrderedMarkdown] = useState<string[]>([]);
   const [isBooting, setIsBooting] = useState(true);
 
   useEffect(() => {
@@ -95,6 +98,9 @@ export default function App() {
     setState("idle");
     setOutputPath(null);
     setMessage("Input captured. Ready to convert.");
+    setProcessedInput(null);
+    setManualOrderEnabled(false);
+    setOrderedMarkdown([]);
   }, []);
 
   const handleDropError = useCallback((nextMessage: string) => {
@@ -141,6 +147,83 @@ export default function App() {
     }
   }, [handleDropError, handleDropItems]);
 
+  const ensureProcessedInput = useCallback(async (): Promise<ProcessedInput> => {
+    const [firstItem] = items;
+    if (!firstItem) {
+      throw new Error("Add at least one markdown file, directory, or zip.");
+    }
+    if (processedInput) {
+      return processedInput;
+    }
+    return callTauri<ProcessedInput>("process_input", {
+      inputPath: firstItem.path,
+    });
+  }, [items, processedInput]);
+
+  const handleManualOrderToggle = useCallback(async () => {
+    if (!manualOrderEnabled) {
+      setState("processing");
+      setMessage("Scanning files to enable manual ordering.");
+      try {
+        const processed = await ensureProcessedInput();
+        setProcessedInput(processed);
+        setOrderedMarkdown(processed.markdown_files);
+        setManualOrderEnabled(true);
+        setState("idle");
+        setMessage("Manual ordering enabled. Arrange markdown files before converting.");
+      } catch (error) {
+        setState("error");
+        setMessage(getErrorMessage(error));
+      }
+      return;
+    }
+
+    setManualOrderEnabled(false);
+    setOrderedMarkdown([]);
+    if (state === "success" && outputPath) {
+      setMessage("Manual ordering disabled. Previous export is preserved.");
+    } else {
+      setMessage("Manual ordering disabled. Ready to convert.");
+    }
+  }, [ensureProcessedInput, manualOrderEnabled, outputPath, state]);
+
+  const handleMoveMarkdown = useCallback((index: number, delta: number) => {
+    setOrderedMarkdown((current) => {
+      const nextIndex = index + delta;
+      if (nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+      const copy = [...current];
+      const [removed] = copy.splice(index, 1);
+      if (!removed) {
+        return current;
+      }
+      copy.splice(nextIndex, 0, removed);
+      return copy;
+    });
+  }, []);
+
+
+  const handleMarkdownKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>, index: number) => {
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        handleMoveMarkdown(index, -1);
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        handleMoveMarkdown(index, 1);
+      }
+    },
+    [handleMoveMarkdown]
+  );
+
+  const handleResetOrder = useCallback(() => {
+    if (processedInput) {
+      setOrderedMarkdown(processedInput.markdown_files);
+    }
+  }, [processedInput]);
+
   const handleConvert = useCallback(async () => {
     if (items.length === 0) {
       setState("error");
@@ -152,19 +235,12 @@ export default function App() {
     setMessage("Scanning files, resolving images, and composing PDF.");
 
     try {
-      const [firstItem] = items;
-      if (!firstItem) {
-        setState("error");
-        setMessage("Add at least one markdown file, directory, or zip.");
-        return;
-      }
-      const processed = await callTauri<ProcessedInput>("process_input", {
-        inputPath: firstItem.path,
-      });
+      const processed = await ensureProcessedInput();
+      const input = manualOrderEnabled && orderedMarkdown.length > 0
+        ? { ...processed, markdown_files: orderedMarkdown }
+        : processed;
 
-      const result = await callTauri<ConvertResult>("convert_to_pdf", {
-        input: processed,
-      });
+      const result = await callTauri<ConvertResult>("convert_to_pdf", { input });
 
       setOutputPath(result.output_path);
       setState("success");
@@ -174,7 +250,7 @@ export default function App() {
       setState("error");
       setMessage(detail);
     }
-  }, [items]);
+  }, [ensureProcessedInput, items.length, manualOrderEnabled, orderedMarkdown]);
 
   return (
     <div className="min-h-screen bg-ink-950 text-ink-100">
@@ -271,19 +347,106 @@ export default function App() {
                   items.map((item) => (
                     <div
                       key={`${item.path}-${item.name}`}
-                      className="flex items-center justify-between rounded-2xl border border-ink-800/70 bg-ink-950/70 px-4 py-3"
+                      className="flex items-center justify-between gap-4 rounded-2xl border border-ink-800/70 bg-ink-950/70 px-4 py-3"
                     >
-                      <div>
-                        <p className="text-sm text-ink-100">{item.name}</p>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm text-ink-100">{item.name}</p>
                         <p className="text-[11px] uppercase tracking-[0.25em] text-ink-200">
                           {item.kind}
                         </p>
                       </div>
-                      <span className="text-[11px] text-ink-200">{item.path}</span>
                     </div>
                   ))
                 )}
               </div>
+            </div>
+            <div className="rounded-2xl border border-ink-800/70 bg-ink-950/60 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.25em] text-ink-200">
+                    Manual Order
+                  </p>
+                  <p className="mt-2 text-sm text-ink-200">
+                    Use arrow keys on a focused item to reorder.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={[
+                    "rounded-full px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.25em] transition",
+                    manualOrderEnabled
+                      ? "border border-ink-600 bg-ink-900 text-ink-100 hover:border-ink-400"
+                      : "bg-ink-100 text-ink-950 hover:bg-ink-50",
+                  ].join(" ")}
+                  onClick={handleManualOrderToggle}
+                  disabled={state === "processing" || items.length === 0}
+                >
+                  {manualOrderEnabled ? "Disable" : "Enable"}
+                </button>
+              </div>
+              {manualOrderEnabled ? (
+                <div className="mt-4 space-y-2 text-sm text-ink-100">
+                  {orderedMarkdown.length === 0 ? (
+                    <p className="text-ink-200">No markdown files detected.</p>
+                  ) : (
+                    orderedMarkdown.map((path, index) => {
+                      const name = path.split(/[/\\\\]/).pop() ?? path;
+                      const isFirst = index === 0;
+                      const isLast = index === orderedMarkdown.length - 1;
+                      return (
+                        <div
+                          key={path}
+                          className="group flex items-center justify-between gap-3 rounded-2xl border border-ink-800/70 bg-ink-950/70 px-3 py-2 transition focus-visible:border-ink-400 focus-visible:shadow-[0_0_0_1px_rgba(148,163,184,0.35)] focus-visible:outline-none"
+                          onKeyDown={(event) => handleMarkdownKeyDown(event, index)}
+                          tabIndex={0}
+                        >
+                          <div className="flex min-w-0 flex-1 items-start gap-3 w-full">
+                            <div className="flex h-9 w-9 flex-none items-center justify-center rounded-xl border border-ink-800/70 bg-ink-900/70 text-[10px] uppercase tracking-[0.2em] text-ink-300">
+                              {index + 1}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm text-ink-100" title={name}>
+                                {name}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="rounded-full border border-ink-700 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:border-ink-400 disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => handleMoveMarkdown(index, -1)}
+                              disabled={isFirst || state === "processing"}
+                            >
+                              Up
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-full border border-ink-700 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:border-ink-400 disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => handleMoveMarkdown(index, 1)}
+                              disabled={isLast || state === "processing"}
+                            >
+                              Down
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                  <div className="flex items-center justify-between">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-ink-300">
+                      {orderedMarkdown.length} markdown files
+                    </p>
+                    <button
+                      type="button"
+                      className="text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:text-ink-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      onClick={handleResetOrder}
+                      disabled={state === "processing" || !processedInput}
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
             <button
               type="button"
