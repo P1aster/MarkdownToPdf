@@ -35,16 +35,16 @@ const callTauri = async <TResult,>(command: string, args: InvokeArgs) => {
   return invoke<TResult>(command, args);
 };
 
-const openDialog = async (options: OpenDialogOptions): Promise<string | null> => {
+const openDialog = async (options: OpenDialogOptions): Promise<string[] | null> => {
   if (!isTauriRuntime()) {
     throw new Error("Tauri runtime not available. Open this inside the Tauri app.");
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const result = await open(options);
   if (Array.isArray(result)) {
-    return result.length > 0 ? result[0] : null;
+    return result.length > 0 ? result : null;
   }
-  return result ?? null;
+  return result ? [result] : null;
 };
 
 const getErrorMessage = (error: unknown): string => {
@@ -73,6 +73,7 @@ export default function App() {
   const [processedInput, setProcessedInput] = useState<ProcessedInput | null>(null);
   const [manualOrderEnabled, setManualOrderEnabled] = useState(false);
   const [orderedMarkdown, setOrderedMarkdown] = useState<string[]>([]);
+  const [omittedMarkdown, setOmittedMarkdown] = useState<string[]>([]);
   const [isBooting, setIsBooting] = useState(true);
 
   useEffect(() => {
@@ -93,6 +94,8 @@ export default function App() {
     }
   }, [state]);
 
+  const omittedSet = useMemo(() => new Set(omittedMarkdown), [omittedMarkdown]);
+
   const handleDropItems = useCallback((nextItems: DropItem[]) => {
     setItems(nextItems);
     setState("idle");
@@ -101,6 +104,7 @@ export default function App() {
     setProcessedInput(null);
     setManualOrderEnabled(false);
     setOrderedMarkdown([]);
+    setOmittedMarkdown([]);
   }, []);
 
   const handleDropError = useCallback((nextMessage: string) => {
@@ -110,21 +114,24 @@ export default function App() {
 
   const handleBrowseFiles = useCallback(async () => {
     try {
-      const path = await openDialog({
-        multiple: false,
+      const paths = await openDialog({
+        multiple: true,
         filters: [
           { name: "Markdown", extensions: ["md", "markdown"] },
           { name: "Zip", extensions: ["zip"] },
         ],
       });
 
-      if (!path) {
+      if (!paths) {
         return;
       }
 
-      const lower = path.toLowerCase();
-      const kind: DropItem["kind"] = lower.endsWith(".zip") ? "zip" : "file";
-      handleDropItems([{ name: path.split("/").pop() ?? path, path, kind }]);
+      const nextItems = paths.map((path) => {
+        const lower = path.toLowerCase();
+        const kind: DropItem["kind"] = lower.endsWith(".zip") ? "zip" : "file";
+        return { name: path.split("/").pop() ?? path, path, kind };
+      });
+      handleDropItems(nextItems);
     } catch (error) {
       handleDropError(getErrorMessage(error));
     }
@@ -132,15 +139,19 @@ export default function App() {
 
   const handleBrowseFolder = useCallback(async () => {
     try {
-      const path = await openDialog({
+      const paths = await openDialog({
         multiple: false,
         directory: true,
       });
 
-      if (!path) {
+      if (!paths) {
         return;
       }
 
+      const [path] = paths;
+      if (!path) {
+        return;
+      }
       handleDropItems([{ name: path.split("/").pop() ?? path, path, kind: "directory" }]);
     } catch (error) {
       handleDropError(getErrorMessage(error));
@@ -156,7 +167,7 @@ export default function App() {
       return processedInput;
     }
     return callTauri<ProcessedInput>("process_input", {
-      inputPath: firstItem.path,
+      inputPaths: items.map((item) => item.path),
     });
   }, [items, processedInput]);
 
@@ -168,6 +179,7 @@ export default function App() {
         const processed = await ensureProcessedInput();
         setProcessedInput(processed);
         setOrderedMarkdown(processed.markdown_files);
+        setOmittedMarkdown([]);
         setManualOrderEnabled(true);
         setState("idle");
         setMessage("Manual ordering enabled. Arrange markdown files before converting.");
@@ -180,6 +192,7 @@ export default function App() {
 
     setManualOrderEnabled(false);
     setOrderedMarkdown([]);
+    setOmittedMarkdown([]);
     if (state === "success" && outputPath) {
       setMessage("Manual ordering disabled. Previous export is preserved.");
     } else {
@@ -224,6 +237,19 @@ export default function App() {
     }
   }, [processedInput]);
 
+  const handleToggleOmit = useCallback((path: string) => {
+    setOmittedMarkdown((current) => {
+      if (current.includes(path)) {
+        return current.filter((entry) => entry !== path);
+      }
+      return [...current, path];
+    });
+  }, []);
+
+  const handleIncludeAll = useCallback(() => {
+    setOmittedMarkdown([]);
+  }, []);
+
   const handleConvert = useCallback(async () => {
     if (items.length === 0) {
       setState("error");
@@ -236,8 +262,17 @@ export default function App() {
 
     try {
       const processed = await ensureProcessedInput();
-      const input = manualOrderEnabled && orderedMarkdown.length > 0
-        ? { ...processed, markdown_files: orderedMarkdown }
+      const isManualListReady = manualOrderEnabled && orderedMarkdown.length > 0;
+      const filteredMarkdown = isManualListReady
+        ? orderedMarkdown.filter((path) => !omittedMarkdown.includes(path))
+        : processed.markdown_files;
+      if (isManualListReady && filteredMarkdown.length === 0) {
+        setState("error");
+        setMessage("Select at least one markdown file to convert.");
+        return;
+      }
+      const input = isManualListReady
+        ? { ...processed, markdown_files: filteredMarkdown }
         : processed;
 
       const result = await callTauri<ConvertResult>("convert_to_pdf", { input });
@@ -250,7 +285,7 @@ export default function App() {
       setState("error");
       setMessage(detail);
     }
-  }, [ensureProcessedInput, items.length, manualOrderEnabled, orderedMarkdown]);
+  }, [ensureProcessedInput, items.length, manualOrderEnabled, orderedMarkdown, omittedMarkdown]);
 
   return (
     <div className="min-h-screen bg-ink-950 text-ink-100">
@@ -367,7 +402,7 @@ export default function App() {
                     Manual Order
                   </p>
                   <p className="mt-2 text-sm text-ink-200">
-                    Use arrow keys on a focused item to reorder.
+                    Use arrow keys on a focused item to reorder. Omit items to skip them.
                   </p>
                 </div>
                 <button
@@ -393,10 +428,14 @@ export default function App() {
                       const name = path.split(/[/\\\\]/).pop() ?? path;
                       const isFirst = index === 0;
                       const isLast = index === orderedMarkdown.length - 1;
+                      const isOmitted = omittedSet.has(path);
                       return (
                         <div
                           key={path}
-                          className="group flex items-center justify-between gap-3 rounded-2xl border border-ink-800/70 bg-ink-950/70 px-3 py-2 transition focus-visible:border-ink-400 focus-visible:shadow-[0_0_0_1px_rgba(148,163,184,0.35)] focus-visible:outline-none"
+                          className={[
+                            "group flex items-center justify-between gap-3 rounded-2xl border border-ink-800/70 bg-ink-950/70 px-3 py-2 transition focus-visible:border-ink-400 focus-visible:shadow-[0_0_0_1px_rgba(148,163,184,0.35)] focus-visible:outline-none",
+                            isOmitted ? "opacity-60" : "",
+                          ].join(" ")}
                           onKeyDown={(event) => handleMarkdownKeyDown(event, index)}
                           tabIndex={0}
                         >
@@ -411,6 +450,19 @@ export default function App() {
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className={[
+                                "rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.2em] transition",
+                                isOmitted
+                                  ? "border-foam-400/70 text-foam-300 hover:border-foam-200"
+                                  : "border-ink-700 text-ink-200 hover:border-ink-400",
+                              ].join(" ")}
+                              onClick={() => handleToggleOmit(path)}
+                              disabled={state === "processing"}
+                            >
+                              {isOmitted ? "Include" : "Omit"}
+                            </button>
                             <button
                               type="button"
                               className="rounded-full border border-ink-700 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:border-ink-400 disabled:cursor-not-allowed disabled:opacity-40"
@@ -434,16 +486,26 @@ export default function App() {
                   )}
                   <div className="flex items-center justify-between">
                     <p className="text-[11px] uppercase tracking-[0.2em] text-ink-300">
-                      {orderedMarkdown.length} markdown files
+                      {orderedMarkdown.length - omittedMarkdown.length} included · {omittedMarkdown.length} omitted
                     </p>
-                    <button
-                      type="button"
-                      className="text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:text-ink-50 disabled:cursor-not-allowed disabled:opacity-40"
-                      onClick={handleResetOrder}
-                      disabled={state === "processing" || !processedInput}
-                    >
-                      Reset
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        className="text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:text-ink-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        onClick={handleIncludeAll}
+                        disabled={state === "processing" || omittedMarkdown.length === 0}
+                      >
+                        Include all
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[11px] uppercase tracking-[0.2em] text-ink-200 transition hover:text-ink-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        onClick={handleResetOrder}
+                        disabled={state === "processing" || !processedInput}
+                      >
+                        Reset
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : null}

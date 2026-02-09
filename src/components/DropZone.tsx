@@ -14,14 +14,15 @@ export type DropZoneProps = {
   onBrowseFolder?: () => void;
 };
 
-const ACCEPTED_EXTENSIONS = [".md", ".markdown", ".zip"];
-
 const classifyItem = (name: string): DropItem["kind"] => {
   if (name.endsWith(".zip")) {
     return "zip";
   }
   if (name.endsWith(".md") || name.endsWith(".markdown")) {
     return "file";
+  }
+  if (!name.includes(".")) {
+    return "directory";
   }
   return "unknown";
 };
@@ -60,11 +61,13 @@ export default function DropZone({
       if (!fileList || fileList.length === 0) {
         return;
       }
-      const items: DropItem[] = Array.from(fileList).map((file) => ({
-        name: file.name,
-        path: resolvePath(file),
-        kind: classifyItem(file.name.toLowerCase()),
-      }));
+      const items: DropItem[] = Array.from(fileList).map((file) => {
+        return {
+          name: file.name,
+          path: resolvePath(file),
+          kind: classifyItem(file.name.toLowerCase()),
+        };
+      });
 
       const hasAbsolutePath = items.every((item) => isAbsolutePath(item.path));
       if (!hasAbsolutePath) {
@@ -72,9 +75,7 @@ export default function DropZone({
         return;
       }
 
-      const hasAccepted = items.some((item) =>
-        ACCEPTED_EXTENSIONS.some((ext) => item.name.toLowerCase().endsWith(ext))
-      );
+      const hasAccepted = items.some((item) => item.kind !== "unknown");
 
       if (!hasAccepted) {
         onError?.("Drop a markdown file, a directory, or a zip archive.");

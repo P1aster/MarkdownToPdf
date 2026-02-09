@@ -17,7 +17,7 @@ use walkdir::WalkDir;
 
 #[derive(Default)]
 pub struct AppState {
-    temp_dir: Mutex<Option<TempDir>>,
+    temp_dirs: Mutex<Vec<TempDir>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,47 +34,55 @@ pub struct ConvertResult {
 
 #[tauri::command]
 fn process_input(
-    input_path: String,
+    input_paths: Vec<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProcessedInput, String> {
-    let path = PathBuf::from(&input_path);
-    if !path.exists() {
-        return Err(format!(
-            "Input path does not exist: {}",
-            path.to_string_lossy()
-        ));
+    if input_paths.is_empty() {
+        return Err("No input paths provided".to_string());
     }
 
     let mut temp_dir_guard = state
-        .temp_dir
+        .temp_dirs
         .lock()
         .map_err(|_| "Failed to lock temporary directory state".to_string())?;
-    *temp_dir_guard = None;
+    temp_dir_guard.clear();
 
-    let (scan_root, output_root) = if path.is_file()
-        && path.extension().and_then(|ext| ext.to_str()) == Some("zip")
-    {
-        let extracted = extract_zip(&path)?;
-        let scan_root = extracted.path().to_path_buf();
-        let output_root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        *temp_dir_guard = Some(extracted);
-        (scan_root, output_root)
-    } else if path.is_file() {
-        let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        (root.clone(), root)
-    } else {
-        (path.clone(), path.clone())
-    };
+    let mut scan_roots: Vec<PathBuf> = Vec::new();
+    let mut output_roots: Vec<PathBuf> = Vec::new();
 
-    let (markdown_files, image_files) = collect_assets(&scan_root)?;
+    for input_path in input_paths {
+        let path = PathBuf::from(&input_path);
+        if !path.exists() {
+            return Err(format!(
+                "Input path does not exist: {}",
+                path.to_string_lossy()
+            ));
+        }
 
-    let result = ProcessedInput {
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("zip") {
+            let extracted = extract_zip(&path)?;
+            scan_roots.push(extracted.path().to_path_buf());
+            output_roots.push(path.parent().unwrap_or(Path::new(".")).to_path_buf());
+            temp_dir_guard.push(extracted);
+        } else if path.is_file() {
+            scan_roots.push(path.clone());
+            output_roots.push(path.parent().unwrap_or(Path::new(".")).to_path_buf());
+        } else {
+            scan_roots.push(path.clone());
+            output_roots.push(path.clone());
+        }
+    }
+
+    let (markdown_files, image_files) = collect_assets(&scan_roots)?;
+    let output_root = common_root(&output_roots)
+        .filter(|path| path.parent().is_some())
+        .unwrap_or_else(|| output_roots[0].clone());
+
+    Ok(ProcessedInput {
         markdown_files,
         image_files,
         root: output_root.to_string_lossy().to_string(),
-    };
-
-    Ok(result)
+    })
 }
 
 #[tauri::command]
@@ -89,8 +97,8 @@ fn convert_to_pdf(
     let output_path = PathBuf::from(&input.root).join("markdown_export.pdf");
     render_markdown_pdf(&input.markdown_files, &output_path)?;
 
-    if let Ok(mut temp_dir_guard) = state.temp_dir.lock() {
-        *temp_dir_guard = None;
+    if let Ok(mut temp_dir_guard) = state.temp_dirs.lock() {
+        temp_dir_guard.clear();
     }
 
     Ok(ConvertResult {
@@ -121,19 +129,27 @@ fn extract_zip(path: &Path) -> Result<TempDir, String> {
     Ok(temp_dir)
 }
 
-fn collect_assets(root: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+fn collect_assets(roots: &[PathBuf]) -> Result<(Vec<String>, Vec<String>), String> {
     let mut markdown_files = Vec::new();
     let mut image_files = Vec::new();
 
-    for entry in WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
-        if !entry.file_type().is_file() {
+    for root in roots {
+        if root.is_file() {
+            if is_markdown(root) {
+                markdown_files.push(root.to_string_lossy().to_string());
+            }
             continue;
         }
-        let path = entry.path();
-        if is_markdown(path) {
-            markdown_files.push(path.to_string_lossy().to_string());
-        } else if is_image(path) {
-            image_files.push(path.to_string_lossy().to_string());
+        for entry in WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if is_markdown(path) {
+                markdown_files.push(path.to_string_lossy().to_string());
+            } else if is_image(path) {
+                image_files.push(path.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -157,6 +173,33 @@ fn is_image(path: &Path) -> bool {
             | Some("webp")
             | Some("bmp")
     )
+}
+
+fn common_root(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut iter = paths.iter();
+    let first = iter.next()?.components().collect::<Vec<_>>();
+    let mut common_len = first.len();
+
+    for path in iter {
+        let components = path.components().collect::<Vec<_>>();
+        common_len = common_len.min(components.len());
+        for i in 0..common_len {
+            if components[i] != first[i] {
+                common_len = i;
+                break;
+            }
+        }
+    }
+
+    if common_len == 0 {
+        None
+    } else {
+        let mut common = PathBuf::new();
+        for component in &first[..common_len] {
+            common.push(component.as_os_str());
+        }
+        Some(common)
+    }
 }
 
 const PAGE_WIDTH_MM: f32 = 210.0;
@@ -451,11 +494,12 @@ fn render_markdown_pdf(files: &[String], output_path: &Path) -> Result<(), Strin
 
     for file in files {
         let path = PathBuf::from(file);
-        let mut contents = String::new();
+        let mut bytes = Vec::new();
         File::open(&path)
             .map_err(|err| err.to_string())?
-            .read_to_string(&mut contents)
+            .read_to_end(&mut bytes)
             .map_err(|err| err.to_string())?;
+        let contents = String::from_utf8_lossy(&bytes);
 
         let title = path
             .file_name()
